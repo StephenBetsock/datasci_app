@@ -1,0 +1,155 @@
+---
+title: "WineMachLearnProject"
+author: "Stephen Betsock"
+date: "11/14/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(car)
+library(tidyverse)
+library(corrplot)
+library(ISLR)
+library(klaR)
+```
+1: Background
+ This data set is from the machine learning repository from UCI. There are a total of 6497 observations in the data (4898 white, 1599 red) with 12 features. We will combine Red and White data and add color as a 13th feature. The "quality" variable is going to be our response variable in some fashion. First We want to produce some correlation plots and look at diagnostic information
+
+```{r}
+
+#1a) Read in files 
+redwine <- read.csv("C:/Users/stb/rfiles/school/datasci/data/winequality-red.csv")
+whitewine <- read.csv("C:/Users/stb/rfiles/school/datasci/data/winequality-white.csv", sep=";")
+whitewine$color <-"white"
+redwine$color <- "red"
+wines <-rbind(redwine, whitewine)
+wines<-as.data.frame(wines)
+wines$color<-as.factor(wines$color)
+head(wines)
+
+
+#1b)Split to training and testing for future CV
+attach(wines); n = length(quality);
+Z = sample( n, n/2 ) 
+
+#1c)Diagnostics
+plot(table(wines$quality)) #see distribution of quality
+
+#correlaiton & remove collinear variables
+corrplot(cor(wines[1:11]), method = "color", addCoef.col="black", order = "AOE",number.cex=0.75)
+#It looks like there are two cases of high correlation: Free & Total Sulfur Dioxide; then alcohol and density. Lets eliminate total sulfur dioxide and density, since those two items have more high correltion with other items
+wines<-wines %>% 
+        select(-c(density, free.sulfur.dioxide))
+corrplot(cor(wines[1:9]), method = "color", addCoef.col="black", order = "AOE",number.cex=0.75)
+
+#Plot each response variable and the dependent varibale; quality.  We can see below that each of these has "outlier observationas but given this is university data we they were probably correclty collected, so it is hard to justify kicking them out of the data set
+par(mfrow = c(3,3))
+for (i in c(1:9)) {
+    plot(wines[, i], jitter(wines[, "quality"]), xlab = names(wines)[i],
+         ylab = "quality", col = "firebrick", cex = 0.8, cex.lab = 1.3)
+    abline(lm(wines[, "quality"] ~ wines[ ,i]), lty = 2, lwd = 2)
+}
+par(mfrow = c(1, 1))
+```
+
+## Part 1a: linear model
+When I started I saw the response variable was numeric so I started using least quares regression for a baseline model. After I ran the model I saw there were a discrete number of values for the response so I ended up treating it as an ordinal facotr or binary (good/poor) for most responses
+```{r}
+#Linear Model with variable selection 
+reg.fit = lm(quality~fixed.acidity + volatile.acidity + citric.acid +residual.sugar+chlorides+ pH + sulphates + alcohol + color, subset=Z)
+par(mfrow=c(2,2))
+plot(reg.fit)
+summary(reg.fit)
+quality_predicted = predict( reg.fit, wines )
+plot(quality[-Z],quality_predicted[-Z])
+abline(0,1) 
+```
+While the independent variable is numeric, there are a finite number of values QUANTITY takes--so we SHOULD NOT use this model. The discrete value resposne varible means that we should treat the response varible as a factor and use a Generalized linear model instead of a least squares model. The ratings are ordinal (e.g. a 10 is higher than a 9, but the difference is subjective) so the appropraite model to use is Ordinal Multinomial Logistic Regression
+
+## Part 1b: GLM
+```{r}
+ftable(xtabs(~quality+color, data=wines))
+library(MASS)
+wine.polr<-polr(as.factor(quality) ~ fixed.acidity + volatile.acidity + citric.acid +residual.sugar+chlorides+ pH + sulphates + alcohol + color,subset=Z, Hess=T)
+summary(wine.polr)
+```
+For ordinal outcome QUALITY with j=7 categories (categories 1, 2, 10 are not present in the data, so we are just prediciting a 3-9), P(QUALITY ≤j is the cumulative probability of Y less than or equal to the given specific category QUALITY =3,...,QUALITY=9. THe odds of being in a particular category are defined as P(QUAL≤j)/P(QUAL>j). So the parameterization of the model is logit(P(QUAL ≤j))=B0-n*x_1-...-n*x_i.
+
+The Intterpritation is as follows
+logit(^P(Y≤1))=3.3–(-0.004)∗fixed.acidity–(−4.9)∗Volitile.Acidity-...-(-0.69)∗color(white)
+logit(^P(Y≤2))=5.5–(-0.004)∗fixed.acidity–(−4.9)∗Volitile.Acidity-...-(-0.69)∗color(white)
+...and so on
+
+# Part 2: Logistic regression & ROC curve
+
+Since we covered binary logistic regression in class I will coerce the data into this format by making the response variable good/bad. Wine ratings 3-5 are bad and 6-9 are good.
+```{r}
+wines <- wines %>%
+      mutate(good = ifelse(quality >= 6,1,0))
+fit = glm( good ~fixed.acidity + volatile.acidity + citric.acid + residual.sugar + chlorides + pH + sulphates + alcohol + color,data=wines, family = binomial )
+summary(fit)
+Prob = fitted.values(fit)
+# To test this we will use cross validation. We will start with a subjective cutoff and then use a ROC curve to optimize
+YesPredict = 1*(Prob > 0.5)
+table( wines$good, YesPredict )
+sum(YesPredict==wines$good)/(sum(YesPredict==wines$good) + sum(YesPredict!=wines$good)) #fairly accurate but we will see if we can improve it
+
+#Determine Prediction accuracy with Cross Validaiton
+wines.training = wines[ Z, ]
+wines.testing = wines[ -Z, ]
+fit = glm( good ~fixed.acidity + volatile.acidity + citric.acid +residual.sugar+chlorides+ pH + sulphates + alcohol + color, family = binomial, data=wines.training )
+Prob = predict( fit, data.frame(wines.testing), type="response" )
+YesPredict = 1*( Prob > 0.5 )
+attach(wines.testing)
+table( YesPredict, good )
+sum(YesPredict==good)/(sum(YesPredict==good) + sum(YesPredict!=good)) #The accuracy of our model is about the same!
+
+#ROC Curve
+TPR = rep(0,100); FPR = rep(0,100);
+
+for (k in 1:100){
+ fit = glm(good ~fixed.acidity + volatile.acidity + citric.acid + residual.sugar+chlorides+ pH + sulphates + alcohol + color, data=wines[ Z, ], family = binomial)
+ Prob = predict( fit, data.frame(wines[-Z,]), type="response" )
+ Yhat = (Prob > k/100 )
+ TPR[k] = sum( Yhat==1 & good==1 ) / sum( good == 1 )
+ FPR[k] = sum( Yhat==1 & good==0 ) / sum( good == 0 )}
+plot(FPR, TPR, xlab="False positive rate", ylab="True positive rate", main="ROC curve")
+lines(FPR, TPR)
+
+#Calculate area under ROC
+simple_auc <- function(TPR, FPR){
+  dFPR <- -c(diff(FPR), 0)
+  dTPR <- -c(diff(TPR), 0)
+  sum(TPR * dFPR) + sum(dTPR * dFPR)/2
+}
+
+with(wines, simple_auc(TPR, FPR))
+```
+There are different ways to select a cutoff point; where sensitivity=specificity, minimize space under the curve, or subjectively if the expected loss for a false postiive or negative outweights the other, and many more. Without a constaining equation the cutoff selection is arbitrary. Power (The true positive rate) is often what governs the constrant and selected cutoff value.
+
+FOr the next task we will will use LDA and QDA as a prediction method
+```{r}
+#LDA & QDA
+wines <- wines %>%
+      mutate(quality2 = ifelse(quality == 9,8,wines$quality))
+library(MASS)
+lda.fit = MASS::lda( quality2 ~ fixed.acidity + volatile.acidity + citric.acid +residual.sugar+chlorides+ pH + sulphates + alcohol + color, CV=TRUE, data=wines)
+MASS::lda( quality2 ~ fixed.acidity + volatile.acidity + citric.acid +residual.sugar+chlorides+ pH + sulphates + alcohol + color, data=wines)
+```
+Above, LD1-LD6 are used to determine the fisher's linear discriminants, also names LD1-LD6. Discriminant 1 is a minear funciton that achieves maximal seperation of the 7 quality classificaitons. Each subsequent discriminant is orthoganal to other discriminants and achieves maximal seperation. The proportion of trace shows how much variation is captured in each set of coefficients. In this case 89.1% of the differences between groups can be accounted for by the LD1 coefficents, 8.8% by LD2, and so on.
+```{r}
+#Cross validation  for LDA & QDA
+table( wines$quality2, lda.fit$class)
+mean( wines$quality2 == lda.fit$class )
+
+#We are only getting a 54% correct prediction rate, which is OK given the number of classes but far from ideal. We wil use other models and see if we can find something better
+
+#QDA
+wine_qda<-qda( quality2 ~ fixed.acidity + volatile.acidity + citric.acid +residual.sugar+chlorides+ pH + sulphates + alcohol + color, CV=TRUE, data=wines)
+table(wines$quality2, wine_qda$class)
+mean(wines$quality2== wine_qda$class)
+```
+
+```{r}
+```
